@@ -1098,4 +1098,13 @@ declare module 'vscode' {
 		readonly activeSignatureHelp?: SignatureHelp;
 	}
 	//#endregion
+
+	//#region Autofix - mjbvz
+	export namespace CodeActionKind {
+		/**
+		 * Base kind for an auto fix source action: `source.autoFix`.
+		 */
+		export const SourceAutoFix: CodeActionKind;
+	}
+	//#endregion
 }
