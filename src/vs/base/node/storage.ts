@@ -12,6 +12,7 @@ import { mapToString, setToString } from 'vs/base/common/map';
 import { basename } from 'path';
 import { mark } from 'vs/base/common/performance';
 import { copy, renameIgnoreError, unlink } from 'vs/base/node/pfs';
+import { fill } from 'vs/base/common/arrays';
 
 export enum StorageHint {
 
@@ -328,6 +329,7 @@ export class SQLiteStorageDatabase implements IStorageDatabase {
 	private static measuredRequireDuration: boolean; // TODO@Ben remove me after a while
 
 	private static BUSY_OPEN_TIMEOUT = 2000; // timeout in ms to retry when opening DB fails with SQLITE_BUSY
+	private static MAX_ITEMS_PER_STATEMENT = 500; // maximum number of items to group within a statement
 
 	private path: string;
 	private name: string;
@@ -383,12 +385,10 @@ export class SQLiteStorageDatabase implements IStorageDatabase {
 		}
 
 		return this.transaction(connection, () => {
+
+			// INSERT
 			if (request.insert && request.insert.size > 0) {
-				this.prepare(connection, 'INSERT INTO ItemTable VALUES (?,?)', stmt => {
-					request.insert!.forEach((value, key) => {
-						stmt.run([key, value]);
-					});
-				}, () => {
+				const insertErrorDetails = () => {
 					const keys: string[] = [];
 					let length = 0;
 					request.insert!.forEach((value, key) => {
@@ -397,22 +397,58 @@ export class SQLiteStorageDatabase implements IStorageDatabase {
 					});
 
 					return `Keys: ${keys.join(', ')} Length: ${length}`;
-				});
+				};
+
+				// Optimization: if we find the number of items to INSERT little, we
+				// produce one prepared statement with variables for each value to
+				// avoid switching between JS context and C++ context too much.
+				if (request.insert!.size < SQLiteStorageDatabase.MAX_ITEMS_PER_STATEMENT) {
+					this.prepare(connection, `INSERT INTO ItemTable VALUES ${fill(request.insert!.size, '(?,?)').join(',')}`, stmt => {
+						const keyValues: string[] = [];
+
+						request.insert!.forEach((value, key) => {
+							keyValues.push(key, value);
+						});
+
+						stmt.run(keyValues);
+					}, () => insertErrorDetails());
+				} else {
+					this.prepare(connection, 'INSERT INTO ItemTable VALUES (?,?)', stmt => {
+						request.insert!.forEach((value, key) => {
+							stmt.run([key, value]);
+						});
+					}, () => insertErrorDetails());
+				}
 			}
 
+			// DELETE
 			if (request.delete && request.delete.size) {
-				this.prepare(connection, 'DELETE FROM ItemTable WHERE key=?', stmt => {
-					request.delete!.forEach(key => {
-						stmt.run(key);
-					});
-				}, () => {
+				const deleteErrorDetails = () => {
 					const keys: string[] = [];
 					request.delete!.forEach(key => {
 						keys.push(key);
 					});
 
 					return `Keys: ${keys.join(', ')}`;
-				});
+				};
+
+				// Optimization: if we find the number of items to DELETE little, we
+				// produce one prepared statement with variables for each value to
+				// avoid switching between JS context and C++ context too much.
+				if (request.delete!.size < SQLiteStorageDatabase.MAX_ITEMS_PER_STATEMENT) {
+					this.prepare(connection, `DELETE FROM ItemTable WHERE key IN (${fill(request.delete!.size, '?').join(',')})`, stmt => {
+						const keys: string[] = [];
+						request.delete!.forEach(key => keys.push(key));
+
+						stmt.run(keys);
+					}, () => deleteErrorDetails());
+				} else {
+					this.prepare(connection, 'DELETE FROM ItemTable WHERE key=?', stmt => {
+						request.delete!.forEach(key => {
+							stmt.run(key);
+						});
+					}, () => deleteErrorDetails());
+				}
 			}
 		});
 	}
